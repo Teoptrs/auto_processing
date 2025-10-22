@@ -451,7 +451,8 @@ class ProcessingExporterApp(tk.Tk):
 
         if self.export_method_var.get():
             method_name = self.method_name_var.get().strip() or "drawShapes"
-            lines = [f"void {method_name}() {{"]
+            parameter_list = self._method_parameter_list()
+            lines = [f"void {method_name}{parameter_list} {{"]
             lines.extend(
                 shape.to_processing(coord_formatter=self.format_coord)
                 for shape in self.shapes
@@ -565,15 +566,26 @@ class ProcessingExporterApp(tk.Tk):
         rounded = int(round(value))
         if not self.relative_mode_var.get():
             return str(rounded)
-        if axis == "x":
-            var_name = self.relative_x_var.get().strip() or "shapex"
-        else:
-            var_name = self.relative_y_var.get().strip() or "shapey"
+        var_name = self._relative_var_name(axis)
         if rounded == 0:
             return var_name
         if rounded > 0:
             return f"{var_name} + {rounded}"
         return f"{var_name} - {abs(rounded)}"
+
+    def _relative_var_name(self, axis: str) -> str:
+        if axis == "x":
+            return self.relative_x_var.get().strip() or "shapex"
+        if axis == "y":
+            return self.relative_y_var.get().strip() or "shapey"
+        raise ValueError(f"Unsupported axis: {axis}")
+
+    def _method_parameter_list(self) -> str:
+        if not self.relative_mode_var.get():
+            return "()"
+        x_var = self._relative_var_name("x")
+        y_var = self._relative_var_name("y")
+        return f"(float {x_var}, float {y_var})"
 
 
 def main() -> None:
