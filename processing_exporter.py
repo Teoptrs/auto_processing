@@ -17,7 +17,6 @@ CANVAS_HEIGHT = 600
 
 def _normalize_box(p1: Tuple[int, int], p2: Tuple[int, int]) -> List[Tuple[int, int]]:
     """Return the top-left and bottom-right corners of a box defined by p1/p2."""
-
     x1, y1 = p1
     x2, y2 = p2
     left, right = sorted((x1, x2))
@@ -27,7 +26,6 @@ def _normalize_box(p1: Tuple[int, int], p2: Tuple[int, int]) -> List[Tuple[int, 
 
 def _box_center(p1: Tuple[int, int], p2: Tuple[int, int]) -> Tuple[float, float]:
     """Return the center point for the bounding box defined by two corners."""
-
     return ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
 
 
@@ -41,7 +39,6 @@ def _arc_geometry(
 
     Returns a tuple of (start_rad, stop_rad, start_deg, extent_deg, center).
     """
-
     center = _box_center(box_p1, box_p2)
     cx, cy = center
     start_rad = math.atan2(start_point[1] - cy, start_point[0] - cx)
@@ -128,11 +125,13 @@ class Shape:
                 )
                 for point in self.points
             ]
-            return "\n".join([
-                "  beginShape();",
-                *vertices,
-                "  endShape(CLOSE);",
-            ])
+            return "\n".join(
+                [
+                    "  beginShape();",
+                    *vertices,
+                    "  endShape(CLOSE);",
+                ]
+            )
         raise ValueError(f"Unsupported shape type: {self.shape_type}")
 
 
@@ -189,7 +188,7 @@ class ProcessingExporterApp(tk.Tk):
         self.output_text.insert(tk.END, "Processing code will appear here after exporting.\n")
         self.output_text.configure(state=tk.DISABLED)
 
-    def required_points(self) -> int:
+    def required_points(self) -> Optional[int]:
         shape = self.shape_var.get()
         if shape == "Custom Shape":
             return None
@@ -265,16 +264,19 @@ class ProcessingExporterApp(tk.Tk):
             self.canvas.create_polygon(*coords, outline="black", fill="")
         elif shape.shape_type == "Arc":
             box_p1, box_p2, start_point, end_point = shape.points
-            _, _, start_deg, extent_deg, _ = _arc_geometry(
+            start_rad, _, _, extent_deg, _ = _arc_geometry(
                 box_p1, box_p2, start_point, end_point
             )
+            # Convert to Tkinter angles (degrees CCW from 3 o'clock); invert for screen Y-down.
+            tk_start = (-math.degrees(start_rad)) % 360
+            tk_extent = -extent_deg
             self.canvas.create_arc(
                 box_p1[0],
                 box_p1[1],
                 box_p2[0],
                 box_p2[1],
-                start=start_deg,
-                extent=extent_deg,
+                start=tk_start,
+                extent=tk_extent,
                 style=tk.ARC,
                 outline="black",
             )
@@ -289,9 +291,7 @@ class ProcessingExporterApp(tk.Tk):
         if shape == "Line" and len(points) == 2:
             x1, y1 = points[0]
             x2, y2 = points[1]
-            preview_items.append(
-                self.canvas.create_line(x1, y1, x2, y2, dash=(3, 3))
-            )
+            preview_items.append(self.canvas.create_line(x1, y1, x2, y2, dash=(3, 3)))
         elif shape == "Rectangle" and len(points) == 2:
             p1, p2 = _normalize_box(points[0], points[1])
             preview_items.append(
@@ -305,53 +305,45 @@ class ProcessingExporterApp(tk.Tk):
         elif shape == "Triangle" and len(points) == 3:
             coords = [coord for point in points for coord in point]
             preview_items.append(
-                self.canvas.create_polygon(
-                    *coords, dash=(3, 3), outline="black", fill=""
-                )
+                self.canvas.create_polygon(*coords, dash=(3, 3), outline="black", fill="")
             )
         elif shape == "Arc" and len(points) >= 2:
             box_p1, box_p2 = _normalize_box(points[0], points[1])
             preview_items.append(
-                self.canvas.create_oval(
-                    box_p1[0], box_p1[1], box_p2[0], box_p2[1], dash=(3, 3)
-                )
+                self.canvas.create_oval(box_p1[0], box_p1[1], box_p2[0], box_p2[1], dash=(3, 3))
             )
             center = _box_center(box_p1, box_p2)
             cx, cy = center
             if len(points) >= 3:
                 start_point = points[2]
                 preview_items.append(
-                    self.canvas.create_line(
-                        cx, cy, start_point[0], start_point[1], dash=(3, 3)
-                    )
+                    self.canvas.create_line(cx, cy, start_point[0], start_point[1], dash=(3, 3))
                 )
             if len(points) == 4:
-                _, _, start_deg, extent_deg, _ = _arc_geometry(
+                start_rad, _, _, extent_deg, _ = _arc_geometry(
                     box_p1, box_p2, points[2], points[3]
                 )
+                tk_start = (-math.degrees(start_rad)) % 360
+                tk_extent = -extent_deg
                 preview_items.append(
                     self.canvas.create_arc(
                         box_p1[0],
                         box_p1[1],
                         box_p2[0],
                         box_p2[1],
-                        start=start_deg,
-                        extent=extent_deg,
+                        start=tk_start,
+                        extent=tk_extent,
                         style=tk.ARC,
                         dash=(3, 3),
                     )
                 )
                 end_point = points[3]
                 preview_items.append(
-                    self.canvas.create_line(
-                        cx, cy, end_point[0], end_point[1], dash=(3, 3)
-                    )
+                    self.canvas.create_line(cx, cy, end_point[0], end_point[1], dash=(3, 3))
                 )
         elif shape == "Custom Shape" and len(points) >= 2:
             coords = [coord for point in points for coord in point]
-            preview_items.append(
-                self.canvas.create_line(*coords, dash=(3, 3))
-            )
+            preview_items.append(self.canvas.create_line(*coords, dash=(3, 3)))
         self.current_preview_ids = preview_items
 
     def clear_preview(self) -> None:
