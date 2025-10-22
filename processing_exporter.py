@@ -8,8 +8,8 @@ drawing.
 
 import math
 import tkinter as tk
-from tkinter import ttk, messagebox
-from typing import List, Optional, Tuple
+from tkinter import messagebox, ttk
+from typing import Callable, List, Optional, Tuple
 
 CANVAS_WIDTH = 800
 CANVAS_HEIGHT = 600
@@ -61,19 +61,26 @@ class Shape:
         self.shape_type = shape_type
         self.points = points
 
-    def to_processing(self) -> str:
+    def to_processing(
+        self, coord_formatter: Optional[Callable[[float, str], str]] = None
+    ) -> str:
         """Return Processing code for this shape."""
+        if coord_formatter is None:
+            coord_formatter = lambda value, axis: str(int(round(value)))
         if self.shape_type == "Line":
             (x1, y1), (x2, y2) = self.points
-            return f"  line({int(round(x1))}, {int(round(y1))}, {int(round(x2))}, {int(round(y2))});"
+            return (
+                f"  line({coord_formatter(x1, 'x')}, {coord_formatter(y1, 'y')}, "
+                f"{coord_formatter(x2, 'x')}, {coord_formatter(y2, 'y')});"
+            )
         if self.shape_type == "Rectangle":
             (x1, y1), (x2, y2) = self.points
             width = x2 - x1
             height = y2 - y1
             return (
                 "  rect({0}, {1}, {2}, {3});".format(
-                    int(round(x1)),
-                    int(round(y1)),
+                    coord_formatter(x1, "x"),
+                    coord_formatter(y1, "y"),
                     int(round(width)),
                     int(round(height)),
                 )
@@ -85,21 +92,18 @@ class Shape:
             center_x, center_y = _box_center((x1, y1), (x2, y2))
             return (
                 "  ellipse({0}, {1}, {2}, {3});".format(
-                    int(round(center_x)),
-                    int(round(center_y)),
+                    coord_formatter(center_x, "x"),
+                    coord_formatter(center_y, "y"),
                     int(round(width)),
                     int(round(height)),
                 )
             )
         if self.shape_type == "Triangle":
-            return "  triangle({0}, {1}, {2}, {3}, {4}, {5});".format(
-                int(round(self.points[0][0])),
-                int(round(self.points[0][1])),
-                int(round(self.points[1][0])),
-                int(round(self.points[1][1])),
-                int(round(self.points[2][0])),
-                int(round(self.points[2][1])),
-            )
+            coords: List[str] = []
+            for x, y in self.points:
+                coords.append(coord_formatter(x, "x"))
+                coords.append(coord_formatter(y, "y"))
+            return f"  triangle({', '.join(coords)});"
         if self.shape_type == "Arc":
             box_p1, box_p2, start_point, end_point = self.points
             width = box_p2[0] - box_p1[0]
@@ -110,8 +114,8 @@ class Shape:
             cx, cy = center
             return (
                 "  arc({0}, {1}, {2}, {3}, {4:.3f}, {5:.3f});".format(
-                    int(round(cx)),
-                    int(round(cy)),
+                    coord_formatter(cx, "x"),
+                    coord_formatter(cy, "y"),
                     int(round(width)),
                     int(round(height)),
                     start_rad,
@@ -121,7 +125,8 @@ class Shape:
         if self.shape_type == "Custom Shape":
             vertices = [
                 "    vertex({0}, {1});".format(
-                    int(round(point[0])), int(round(point[1]))
+                    coord_formatter(point[0], "x"),
+                    coord_formatter(point[1], "y"),
                 )
                 for point in self.points
             ]
@@ -145,6 +150,13 @@ class ProcessingExporterApp(tk.Tk):
         self.shapes: List[Shape] = []
         self.pending_points: List[Tuple[int, int]] = []
         self.current_preview_ids: List[int] = []
+        self.grid_item_ids: List[int] = []
+
+        self.relative_mode_var = tk.BooleanVar(value=False)
+        self.relative_x_var = tk.StringVar(value="shapex")
+        self.relative_y_var = tk.StringVar(value="shapey")
+        self.grid_enabled_var = tk.BooleanVar(value=False)
+        self.grid_size_var = tk.IntVar(value=40)
 
         self._build_ui()
 
@@ -178,6 +190,49 @@ class ProcessingExporterApp(tk.Tk):
         )
         self.finish_button.pack(side=tk.LEFT, padx=5)
 
+        relative_frame = ttk.Frame(self)
+        relative_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
+        self.relative_toggle = ttk.Checkbutton(
+            relative_frame,
+            text="Use relative offsets",
+            variable=self.relative_mode_var,
+            command=self.update_relative_entries,
+        )
+        self.relative_toggle.pack(side=tk.LEFT, padx=5)
+        ttk.Label(relative_frame, text="X var:").pack(side=tk.LEFT)
+        self.relative_x_entry = ttk.Entry(
+            relative_frame, textvariable=self.relative_x_var, width=10
+        )
+        self.relative_x_entry.pack(side=tk.LEFT, padx=(2, 5))
+        ttk.Label(relative_frame, text="Y var:").pack(side=tk.LEFT)
+        self.relative_y_entry = ttk.Entry(
+            relative_frame, textvariable=self.relative_y_var, width=10
+        )
+        self.relative_y_entry.pack(side=tk.LEFT, padx=(2, 5))
+
+        grid_frame = ttk.Frame(self)
+        grid_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
+        self.grid_toggle = ttk.Checkbutton(
+            grid_frame,
+            text="Enable grid snapping",
+            variable=self.grid_enabled_var,
+            command=self.on_grid_toggle,
+        )
+        self.grid_toggle.pack(side=tk.LEFT, padx=5)
+        self.grid_size_label = ttk.Label(
+            grid_frame, text=f"Grid: {self.grid_size_var.get()}px"
+        )
+        self.grid_size_label.pack(side=tk.LEFT, padx=(10, 5))
+        self.grid_size_scale = ttk.Scale(
+            grid_frame,
+            from_=10,
+            to=200,
+            orient=tk.HORIZONTAL,
+            command=self.on_grid_size_change,
+        )
+        self.grid_size_scale.set(self.grid_size_var.get())
+        self.grid_size_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
         self.canvas = tk.Canvas(self, width=CANVAS_WIDTH, height=CANVAS_HEIGHT, bg="white")
         self.canvas.pack(padx=10, pady=10)
         self.canvas.bind("<Button-1>", self.on_canvas_click)
@@ -188,6 +243,9 @@ class ProcessingExporterApp(tk.Tk):
         self.output_text.insert(tk.END, "Processing code will appear here after exporting.\n")
         self.output_text.configure(state=tk.DISABLED)
 
+        self.update_relative_entries()
+        self.draw_grid()
+
     def required_points(self) -> Optional[int]:
         shape = self.shape_var.get()
         if shape == "Custom Shape":
@@ -196,7 +254,8 @@ class ProcessingExporterApp(tk.Tk):
 
     def on_canvas_click(self, event: tk.Event) -> None:
         shape = self.shape_var.get()
-        self.pending_points.append((event.x, event.y))
+        snapped_point = self._apply_grid(event.x, event.y)
+        self.pending_points.append(snapped_point)
         needed = self.required_points()
 
         if shape == "Custom Shape":
@@ -216,20 +275,21 @@ class ProcessingExporterApp(tk.Tk):
     def on_canvas_motion(self, event: tk.Event) -> None:
         if not self.pending_points:
             return
+        snapped_point = self._apply_grid(event.x, event.y)
         shape = self.shape_var.get()
         if shape in {"Line", "Rectangle", "Ellipse"} and len(self.pending_points) == 1:
-            self.draw_preview(self.pending_points[0], (event.x, event.y))
+            self.draw_preview(self.pending_points[0], snapped_point)
         elif shape == "Triangle" and len(self.pending_points) == 2:
             self.draw_preview(
                 self.pending_points[0],
                 self.pending_points[1],
-                (event.x, event.y),
+                snapped_point,
             )
         elif shape == "Arc":
-            preview_points = self.pending_points + [(event.x, event.y)]
+            preview_points = self.pending_points + [snapped_point]
             self.draw_preview(*preview_points)
         elif shape == "Custom Shape":
-            preview_points = self.pending_points + [(event.x, event.y)]
+            preview_points = self.pending_points + [snapped_point]
             self.draw_preview(*preview_points)
 
     def add_shape(
@@ -361,6 +421,8 @@ class ProcessingExporterApp(tk.Tk):
 
     def redraw_canvas(self) -> None:
         self.canvas.delete("all")
+        self.grid_item_ids = []
+        self.draw_grid()
         for shape in self.shapes:
             self.draw_shape(shape)
 
@@ -379,7 +441,10 @@ class ProcessingExporterApp(tk.Tk):
             "void draw() {",
             "  background(255);",
         ]
-        lines.extend(shape.to_processing() for shape in self.shapes)
+        lines.extend(
+            shape.to_processing(coord_formatter=self.format_coord)
+            for shape in self.shapes
+        )
         lines.append("}")
 
         code = "\n".join(lines)
@@ -414,6 +479,68 @@ class ProcessingExporterApp(tk.Tk):
         self.pending_points.clear()
         self.clear_preview()
         self.update_finish_button()
+
+    def update_relative_entries(self) -> None:
+        if self.relative_mode_var.get():
+            self.relative_x_entry.state(["!disabled"])
+            self.relative_y_entry.state(["!disabled"])
+        else:
+            self.relative_x_entry.state(["disabled"])
+            self.relative_y_entry.state(["disabled"])
+
+    def on_grid_toggle(self) -> None:
+        if self.grid_enabled_var.get():
+            self.pending_points = [self._apply_grid(x, y) for x, y in self.pending_points]
+        self.draw_grid()
+        self.clear_preview()
+        if self.pending_points:
+            self.draw_preview(*self.pending_points)
+
+    def on_grid_size_change(self, value: str) -> None:
+        size = max(5, int(float(value)))
+        self.grid_size_var.set(size)
+        self.grid_size_label.configure(text=f"Grid: {size}px")
+        if self.grid_enabled_var.get():
+            self.draw_grid()
+
+    def draw_grid(self) -> None:
+        for item in self.grid_item_ids:
+            self.canvas.delete(item)
+        self.grid_item_ids = []
+        if not self.grid_enabled_var.get():
+            return
+        size = max(5, self.grid_size_var.get())
+        for x in range(0, CANVAS_WIDTH + 1, size):
+            self.grid_item_ids.append(
+                self.canvas.create_line(x, 0, x, CANVAS_HEIGHT, fill="#e0e0e0", tags="grid")
+            )
+        for y in range(0, CANVAS_HEIGHT + 1, size):
+            self.grid_item_ids.append(
+                self.canvas.create_line(0, y, CANVAS_WIDTH, y, fill="#e0e0e0", tags="grid")
+            )
+        self.canvas.tag_lower("grid")
+
+    def _apply_grid(self, x: int, y: int) -> Tuple[int, int]:
+        if not self.grid_enabled_var.get():
+            return x, y
+        size = max(5, self.grid_size_var.get())
+        snapped_x = int(round(x / size) * size)
+        snapped_y = int(round(y / size) * size)
+        return snapped_x, snapped_y
+
+    def format_coord(self, value: float, axis: str) -> str:
+        rounded = int(round(value))
+        if not self.relative_mode_var.get():
+            return str(rounded)
+        if axis == "x":
+            var_name = self.relative_x_var.get().strip() or "shapex"
+        else:
+            var_name = self.relative_y_var.get().strip() or "shapey"
+        if rounded == 0:
+            return var_name
+        if rounded > 0:
+            return f"{var_name} + {rounded}"
+        return f"{var_name} - {abs(rounded)}"
 
 
 def main() -> None:
