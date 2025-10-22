@@ -157,6 +157,8 @@ class ProcessingExporterApp(tk.Tk):
         self.relative_y_var = tk.StringVar(value="shapey")
         self.grid_enabled_var = tk.BooleanVar(value=False)
         self.grid_size_var = tk.IntVar(value=40)
+        self.export_method_var = tk.BooleanVar(value=False)
+        self.method_name_var = tk.StringVar(value="drawShapes")
 
         self._build_ui()
 
@@ -189,6 +191,21 @@ class ProcessingExporterApp(tk.Tk):
             state=tk.DISABLED,
         )
         self.finish_button.pack(side=tk.LEFT, padx=5)
+
+        export_frame = ttk.Frame(self)
+        export_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
+        self.method_toggle = ttk.Checkbutton(
+            export_frame,
+            text="Export as method",
+            variable=self.export_method_var,
+            command=self.update_method_entry,
+        )
+        self.method_toggle.pack(side=tk.LEFT, padx=5)
+        ttk.Label(export_frame, text="Method name:").pack(side=tk.LEFT)
+        self.method_name_entry = ttk.Entry(
+            export_frame, textvariable=self.method_name_var, width=15
+        )
+        self.method_name_entry.pack(side=tk.LEFT, padx=(2, 5))
 
         relative_frame = ttk.Frame(self)
         relative_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
@@ -244,6 +261,7 @@ class ProcessingExporterApp(tk.Tk):
         self.output_text.configure(state=tk.DISABLED)
 
         self.update_relative_entries()
+        self.update_method_entry()
         self.draw_grid()
 
     def required_points(self) -> Optional[int]:
@@ -431,21 +449,30 @@ class ProcessingExporterApp(tk.Tk):
             messagebox.showinfo("Export", "Draw some shapes before exporting.")
             return
 
-        lines = [
-            "void setup() {",
-            f"  size({CANVAS_WIDTH}, {CANVAS_HEIGHT});",
-            "  stroke(0);",
-            "  noFill();",
-            "}",
-            "",
-            "void draw() {",
-            "  background(255);",
-        ]
-        lines.extend(
-            shape.to_processing(coord_formatter=self.format_coord)
-            for shape in self.shapes
-        )
-        lines.append("}")
+        if self.export_method_var.get():
+            method_name = self.method_name_var.get().strip() or "drawShapes"
+            lines = [f"void {method_name}() {{"]
+            lines.extend(
+                shape.to_processing(coord_formatter=self.format_coord)
+                for shape in self.shapes
+            )
+            lines.append("}")
+        else:
+            lines = [
+                "void setup() {",
+                f"  size({CANVAS_WIDTH}, {CANVAS_HEIGHT});",
+                "  stroke(0);",
+                "  noFill();",
+                "}",
+                "",
+                "void draw() {",
+                "  background(255);",
+            ]
+            lines.extend(
+                shape.to_processing(coord_formatter=self.format_coord)
+                for shape in self.shapes
+            )
+            lines.append("}")
 
         code = "\n".join(lines)
         self.output_text.configure(state=tk.NORMAL)
@@ -487,6 +514,12 @@ class ProcessingExporterApp(tk.Tk):
         else:
             self.relative_x_entry.state(["disabled"])
             self.relative_y_entry.state(["disabled"])
+
+    def update_method_entry(self) -> None:
+        if self.export_method_var.get():
+            self.method_name_entry.state(["!disabled"])
+        else:
+            self.method_name_entry.state(["disabled"])
 
     def on_grid_toggle(self) -> None:
         if self.grid_enabled_var.get():
