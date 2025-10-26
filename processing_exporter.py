@@ -9,10 +9,10 @@ drawing.
 import math
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
-CANVAS_WIDTH = 800
-CANVAS_HEIGHT = 600
+DEFAULT_CANVAS_WIDTH = 800
+DEFAULT_CANVAS_HEIGHT = 600
 
 
 def _normalize_box(p1: Tuple[int, int], p2: Tuple[int, int]) -> List[Tuple[int, int]]:
@@ -57,9 +57,15 @@ def _arc_geometry(
 class Shape:
     """Represents a drawn shape."""
 
-    def __init__(self, shape_type: str, points: List[Tuple[float, float]]):
+    def __init__(
+        self,
+        shape_type: str,
+        points: List[Tuple[float, float]],
+        commands: Optional[List[Tuple[str, Sequence[Tuple[float, float]]]]] = None,
+    ) -> None:
         self.shape_type = shape_type
         self.points = points
+        self.commands = commands
 
     def to_processing(
         self, coord_formatter: Optional[Callable[[float, str], str]] = None
@@ -123,6 +129,43 @@ class Shape:
                 )
             )
         if self.shape_type == "Custom Shape":
+            if self.commands:
+                lines = ["  beginShape();"]
+                for command, command_points in self.commands:
+                    if command == "vertex":
+                        (x, y) = command_points[0]
+                        lines.append(
+                            "    vertex({0}, {1});".format(
+                                coord_formatter(x, "x"),
+                                coord_formatter(y, "y"),
+                            )
+                        )
+                    elif command == "quadraticVertex":
+                        control, end_point = command_points
+                        lines.append(
+                            "    quadraticVertex({0}, {1}, {2}, {3});".format(
+                                coord_formatter(control[0], "x"),
+                                coord_formatter(control[1], "y"),
+                                coord_formatter(end_point[0], "x"),
+                                coord_formatter(end_point[1], "y"),
+                            )
+                        )
+                    elif command == "bezierVertex":
+                        control1, control2, end_point = command_points
+                        lines.append(
+                            "    bezierVertex({0}, {1}, {2}, {3}, {4}, {5});".format(
+                                coord_formatter(control1[0], "x"),
+                                coord_formatter(control1[1], "y"),
+                                coord_formatter(control2[0], "x"),
+                                coord_formatter(control2[1], "y"),
+                                coord_formatter(end_point[0], "x"),
+                                coord_formatter(end_point[1], "y"),
+                            )
+                        )
+                    else:
+                        raise ValueError(f"Unsupported custom command: {command}")
+                lines.append("  endShape(CLOSE);")
+                return "\n".join(lines)
             vertices = [
                 "    vertex({0}, {1});".format(
                     coord_formatter(point[0], "x"),
@@ -140,6 +183,73 @@ class Shape:
         raise ValueError(f"Unsupported shape type: {self.shape_type}")
 
 
+def _sample_custom_shape(
+    commands: List[Tuple[str, Sequence[Tuple[float, float]]]],
+    *,
+    steps_per_curve: int = 20,
+    closed: bool = False,
+) -> List[Tuple[float, float]]:
+    """Return an approximated polyline for custom shape commands."""
+
+    if not commands:
+        return []
+
+    first_command, *remaining = commands
+    if first_command[0] != "vertex":
+        raise ValueError("Custom shapes must start with a vertex command")
+
+    points: List[Tuple[float, float]] = [first_command[1][0]]
+    current_point = first_command[1][0]
+
+    for command, command_points in remaining:
+        if command == "vertex":
+            end_point = command_points[0]
+            points.append(end_point)
+            current_point = end_point
+        elif command == "quadraticVertex":
+            control, end_point = command_points
+            for i in range(1, steps_per_curve + 1):
+                t = i / steps_per_curve
+                one_minus_t = 1 - t
+                x = (
+                    one_minus_t * one_minus_t * current_point[0]
+                    + 2 * one_minus_t * t * control[0]
+                    + t * t * end_point[0]
+                )
+                y = (
+                    one_minus_t * one_minus_t * current_point[1]
+                    + 2 * one_minus_t * t * control[1]
+                    + t * t * end_point[1]
+                )
+                points.append((x, y))
+            current_point = end_point
+        elif command == "bezierVertex":
+            control1, control2, end_point = command_points
+            for i in range(1, steps_per_curve + 1):
+                t = i / steps_per_curve
+                one_minus_t = 1 - t
+                x = (
+                    one_minus_t**3 * current_point[0]
+                    + 3 * one_minus_t * one_minus_t * t * control1[0]
+                    + 3 * one_minus_t * t * t * control2[0]
+                    + t**3 * end_point[0]
+                )
+                y = (
+                    one_minus_t**3 * current_point[1]
+                    + 3 * one_minus_t * one_minus_t * t * control1[1]
+                    + 3 * one_minus_t * t * t * control2[1]
+                    + t**3 * end_point[1]
+                )
+                points.append((x, y))
+            current_point = end_point
+        else:
+            raise ValueError(f"Unsupported custom command: {command}")
+
+    if closed and points and points[-1] != points[0]:
+        points.append(points[0])
+    return points
+
+
 class ProcessingExporterApp(tk.Tk):
     """Main application window."""
 
@@ -151,6 +261,17 @@ class ProcessingExporterApp(tk.Tk):
         self.pending_points: List[Tuple[int, int]] = []
         self.current_preview_ids: List[int] = []
         self.grid_item_ids: List[int] = []
+        self.shape_items: List[List[int]] = []
+
+        self.canvas_width = DEFAULT_CANVAS_WIDTH
+        self.canvas_height = DEFAULT_CANVAS_HEIGHT
+        self.canvas_width_var = tk.StringVar(value=str(DEFAULT_CANVAS_WIDTH))
+        self.canvas_height_var = tk.StringVar(value=str(DEFAULT_CANVAS_HEIGHT))
+
+        self.custom_shape_commands_pending: List[
+            Tuple[str, List[Tuple[int, int]]]
+        ] = []
+        self.custom_segment_buffer: List[Tuple[int, int]] = []
 
         self.relative_mode_var = tk.BooleanVar(value=False)
         self.relative_x_var = tk.StringVar(value="shapex")
@@ -179,6 +300,7 @@ class ProcessingExporterApp(tk.Tk):
             "Triangle",
             "Arc",
             "Custom Shape",
+            "Eraser",
         )
         shape_menu.pack(side=tk.LEFT, padx=5)
 
@@ -191,6 +313,37 @@ class ProcessingExporterApp(tk.Tk):
             state=tk.DISABLED,
         )
         self.finish_button.pack(side=tk.LEFT, padx=5)
+
+        self.custom_controls_frame = ttk.Frame(self)
+        ttk.Label(self.custom_controls_frame, text="Segment type:").pack(side=tk.LEFT)
+        self.custom_segment_type_var = tk.StringVar(value="Vertex")
+        self.custom_segment_menu = ttk.OptionMenu(
+            self.custom_controls_frame,
+            self.custom_segment_type_var,
+            "Vertex",
+            "Vertex",
+            "Quadratic Curve",
+            "Bezier Curve",
+        )
+        self.custom_segment_menu.pack(side=tk.LEFT, padx=5)
+        self.custom_segment_type_var.trace_add("write", self.on_custom_segment_change)
+        self.custom_controls_visible = False
+
+        size_frame = ttk.Frame(self)
+        size_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
+        ttk.Label(size_frame, text="Canvas size:").pack(side=tk.LEFT)
+        self.canvas_width_entry = ttk.Entry(
+            size_frame, textvariable=self.canvas_width_var, width=6
+        )
+        self.canvas_width_entry.pack(side=tk.LEFT, padx=(5, 2))
+        ttk.Label(size_frame, text="×").pack(side=tk.LEFT)
+        self.canvas_height_entry = ttk.Entry(
+            size_frame, textvariable=self.canvas_height_var, width=6
+        )
+        self.canvas_height_entry.pack(side=tk.LEFT, padx=(2, 5))
+        ttk.Button(size_frame, text="Apply", command=self.apply_canvas_size).pack(
+            side=tk.LEFT
+        )
 
         export_frame = ttk.Frame(self)
         export_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
@@ -250,7 +403,12 @@ class ProcessingExporterApp(tk.Tk):
         self.grid_size_scale.set(self.grid_size_var.get())
         self.grid_size_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        self.canvas = tk.Canvas(self, width=CANVAS_WIDTH, height=CANVAS_HEIGHT, bg="white")
+        self.canvas = tk.Canvas(
+            self,
+            width=self.canvas_width,
+            height=self.canvas_height,
+            bg="white",
+        )
         self.canvas.pack(padx=10, pady=10)
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.canvas.bind("<Motion>", self.on_canvas_motion)
@@ -263,9 +421,12 @@ class ProcessingExporterApp(tk.Tk):
         self.update_relative_entries()
         self.update_method_entry()
         self.draw_grid()
+        self.update_custom_controls()
 
     def required_points(self) -> Optional[int]:
         shape = self.shape_var.get()
+        if shape == "Eraser":
+            return 0
         if shape == "Custom Shape":
             return None
         return {"Line": 2, "Rectangle": 2, "Ellipse": 2, "Triangle": 3, "Arc": 4}[shape]
@@ -273,14 +434,16 @@ class ProcessingExporterApp(tk.Tk):
     def on_canvas_click(self, event: tk.Event) -> None:
         shape = self.shape_var.get()
         snapped_point = self._apply_grid(event.x, event.y)
-        self.pending_points.append(snapped_point)
-        needed = self.required_points()
-
+        if shape == "Eraser":
+            self.erase_shape_at(snapped_point)
+            return
         if shape == "Custom Shape":
-            if len(self.pending_points) >= 2:
-                self.draw_preview(*self.pending_points)
+            self.handle_custom_shape_click(snapped_point)
             self.update_finish_button()
             return
+
+        self.pending_points.append(snapped_point)
+        needed = self.required_points()
 
         if needed is not None and len(self.pending_points) == needed:
             self.add_shape()
@@ -291,10 +454,16 @@ class ProcessingExporterApp(tk.Tk):
             self.draw_preview(*self.pending_points)
 
     def on_canvas_motion(self, event: tk.Event) -> None:
-        if not self.pending_points:
-            return
         snapped_point = self._apply_grid(event.x, event.y)
         shape = self.shape_var.get()
+        if shape == "Eraser":
+            return
+        if shape == "Custom Shape":
+            if self.custom_shape_commands_pending:
+                self.draw_custom_shape_preview(hover_point=snapped_point)
+            return
+        if not self.pending_points:
+            return
         if shape in {"Line", "Rectangle", "Ellipse"} and len(self.pending_points) == 1:
             self.draw_preview(self.pending_points[0], snapped_point)
         elif shape == "Triangle" and len(self.pending_points) == 2:
@@ -306,14 +475,12 @@ class ProcessingExporterApp(tk.Tk):
         elif shape == "Arc":
             preview_points = self.pending_points + [snapped_point]
             self.draw_preview(*preview_points)
-        elif shape == "Custom Shape":
-            preview_points = self.pending_points + [snapped_point]
-            self.draw_preview(*preview_points)
 
     def add_shape(
         self,
         shape_type: Optional[str] = None,
         points: Optional[List[Tuple[int, int]]] = None,
+        commands: Optional[List[Tuple[str, Sequence[Tuple[int, int]]]]] = None,
     ) -> None:
         shape_type = shape_type or self.shape_var.get()
         source_points = points if points is not None else self.pending_points
@@ -323,23 +490,31 @@ class ProcessingExporterApp(tk.Tk):
         elif shape_type == "Arc":
             box_p1, box_p2 = _normalize_box(points_copy[0], points_copy[1])
             points_copy = [box_p1, box_p2, points_copy[2], points_copy[3]]
-        shape = Shape(shape_type, points_copy)
+        if shape_type == "Custom Shape" and commands is not None:
+            shape = Shape(shape_type, points_copy, commands=list(commands))
+        else:
+            shape = Shape(shape_type, points_copy)
         self.shapes.append(shape)
-        self.draw_shape(shape)
+        self.shape_items.append(self.draw_shape(shape))
 
-    def draw_shape(self, shape: Shape) -> None:
+    def draw_shape(self, shape: Shape) -> List[int]:
+        item_ids: List[int] = []
         if shape.shape_type == "Line":
             (x1, y1), (x2, y2) = shape.points
-            self.canvas.create_line(x1, y1, x2, y2, fill="black")
+            item_ids.append(self.canvas.create_line(x1, y1, x2, y2, fill="black"))
         elif shape.shape_type == "Rectangle":
             (x1, y1), (x2, y2) = shape.points
-            self.canvas.create_rectangle(x1, y1, x2, y2, outline="black")
+            item_ids.append(
+                self.canvas.create_rectangle(x1, y1, x2, y2, outline="black")
+            )
         elif shape.shape_type == "Ellipse":
             (x1, y1), (x2, y2) = shape.points
-            self.canvas.create_oval(x1, y1, x2, y2, outline="black")
+            item_ids.append(self.canvas.create_oval(x1, y1, x2, y2, outline="black"))
         elif shape.shape_type == "Triangle":
             coords = [coord for point in shape.points for coord in point]
-            self.canvas.create_polygon(*coords, outline="black", fill="")
+            item_ids.append(
+                self.canvas.create_polygon(*coords, outline="black", fill="")
+            )
         elif shape.shape_type == "Arc":
             box_p1, box_p2, start_point, end_point = shape.points
             start_rad, _, _, extent_deg, _ = _arc_geometry(
@@ -348,19 +523,30 @@ class ProcessingExporterApp(tk.Tk):
             # Convert to Tkinter angles (degrees CCW from 3 o'clock); invert for screen Y-down.
             tk_start = (-math.degrees(start_rad)) % 360
             tk_extent = -extent_deg
-            self.canvas.create_arc(
-                box_p1[0],
-                box_p1[1],
-                box_p2[0],
-                box_p2[1],
-                start=tk_start,
-                extent=tk_extent,
-                style=tk.ARC,
-                outline="black",
+            item_ids.append(
+                self.canvas.create_arc(
+                    box_p1[0],
+                    box_p1[1],
+                    box_p2[0],
+                    box_p2[1],
+                    start=tk_start,
+                    extent=tk_extent,
+                    style=tk.ARC,
+                    outline="black",
+                )
             )
         elif shape.shape_type == "Custom Shape":
-            coords = [coord for point in shape.points for coord in point]
-            self.canvas.create_polygon(*coords, outline="black", fill="")
+            if shape.commands:
+                sampled = _sample_custom_shape(list(shape.commands), closed=True)
+                if len(sampled) >= 2:
+                    coords = [coord for point in sampled for coord in point]
+                    item_ids.append(self.canvas.create_line(*coords, fill="black"))
+            else:
+                coords = [coord for point in shape.points for coord in point]
+                item_ids.append(
+                    self.canvas.create_polygon(*coords, outline="black", fill="")
+                )
+        return item_ids
 
     def draw_preview(self, *points: Tuple[int, int]) -> None:
         self.clear_preview()
@@ -419,9 +605,6 @@ class ProcessingExporterApp(tk.Tk):
                 preview_items.append(
                     self.canvas.create_line(cx, cy, end_point[0], end_point[1], dash=(3, 3))
                 )
-        elif shape == "Custom Shape" and len(points) >= 2:
-            coords = [coord for point in points for coord in point]
-            preview_items.append(self.canvas.create_line(*coords, dash=(3, 3)))
         self.current_preview_ids = preview_items
 
     def clear_preview(self) -> None:
@@ -429,20 +612,108 @@ class ProcessingExporterApp(tk.Tk):
             self.canvas.delete(item_id)
         self.current_preview_ids = []
 
+    def handle_custom_shape_click(self, point: Tuple[int, int]) -> None:
+        if not self.custom_shape_commands_pending:
+            self.custom_shape_commands_pending.append(("vertex", [point]))
+            self.draw_custom_shape_preview()
+            return
+
+        segment = self.custom_segment_type_var.get()
+        if segment == "Vertex":
+            if self.custom_segment_buffer:
+                self.custom_segment_buffer = []
+            self.custom_shape_commands_pending.append(("vertex", [point]))
+        elif segment == "Quadratic Curve":
+            self.custom_segment_buffer.append(point)
+            if len(self.custom_segment_buffer) == 2:
+                control, end_point = self.custom_segment_buffer
+                self.custom_shape_commands_pending.append(
+                    ("quadraticVertex", [control, end_point])
+                )
+                self.custom_segment_buffer = []
+        elif segment == "Bezier Curve":
+            self.custom_segment_buffer.append(point)
+            if len(self.custom_segment_buffer) == 3:
+                control1, control2, end_point = self.custom_segment_buffer
+                self.custom_shape_commands_pending.append(
+                    ("bezierVertex", [control1, control2, end_point])
+                )
+                self.custom_segment_buffer = []
+        else:
+            raise ValueError(f"Unsupported segment type: {segment}")
+
+        self.draw_custom_shape_preview()
+
+    def draw_custom_shape_preview(
+        self, *, hover_point: Optional[Tuple[int, int]] = None
+    ) -> None:
+        self.clear_preview()
+        preview_items: List[int] = []
+        commands = self.custom_shape_commands_pending
+        last_anchor: Optional[Tuple[int, int]] = None
+        if commands:
+            sampled = _sample_custom_shape(commands, closed=False)
+            if len(sampled) >= 2:
+                coords = [coord for point in sampled for coord in point]
+                preview_items.append(
+                    self.canvas.create_line(*coords, dash=(3, 3), fill="black")
+                )
+            last_anchor = self._custom_shape_last_anchor(commands)
+
+        if last_anchor is not None:
+            connector_points: List[Tuple[int, int]] = [last_anchor]
+            connector_points.extend(self.custom_segment_buffer)
+            if hover_point is not None:
+                connector_points.append(hover_point)
+            if len(connector_points) >= 2:
+                for start, end in zip(connector_points, connector_points[1:]):
+                    preview_items.append(
+                        self.canvas.create_line(
+                            start[0],
+                            start[1],
+                            end[0],
+                            end[1],
+                            dash=(3, 3),
+                            fill="black",
+                        )
+                    )
+
+        self.current_preview_ids = preview_items
+
     def undo_last(self) -> None:
         if not self.shapes:
             messagebox.showinfo("Undo", "No shapes to remove.")
             return
         self.shapes.pop()
+        if self.shape_items:
+            self.shape_items.pop()
         self.redraw_canvas()
         self.update_finish_button()
 
+    def erase_shape_at(self, point: Tuple[int, int]) -> None:
+        if not self.shapes:
+            return
+        x, y = point
+        overlapping = set(self.canvas.find_overlapping(x, y, x, y))
+        if not overlapping:
+            return
+        for index in range(len(self.shape_items) - 1, -1, -1):
+            items = self.shape_items[index]
+            if any(item in overlapping for item in items):
+                del self.shapes[index]
+                del self.shape_items[index]
+                self.redraw_canvas()
+                self.update_finish_button()
+                return
+
     def redraw_canvas(self) -> None:
         self.canvas.delete("all")
+        self.canvas.configure(width=self.canvas_width, height=self.canvas_height)
         self.grid_item_ids = []
         self.draw_grid()
+        self.shape_items = []
         for shape in self.shapes:
-            self.draw_shape(shape)
+            self.shape_items.append(self.draw_shape(shape))
 
     def export_shapes(self) -> None:
         if not self.shapes:
@@ -461,7 +732,7 @@ class ProcessingExporterApp(tk.Tk):
         else:
             lines = [
                 "void setup() {",
-                f"  size({CANVAS_WIDTH}, {CANVAS_HEIGHT});",
+                f"  size({int(self.canvas_width)}, {int(self.canvas_height)});",
                 "  stroke(0);",
                 "  noFill();",
                 "}",
@@ -488,24 +759,39 @@ class ProcessingExporterApp(tk.Tk):
     def finish_custom_shape(self) -> None:
         if self.shape_var.get() != "Custom Shape":
             return
-        if len(self.pending_points) < 3:
-            messagebox.showinfo("Custom Shape", "Add at least three points before finishing.")
+        if self.custom_segment_buffer:
+            messagebox.showinfo(
+                "Custom Shape", "Complete the current segment before finishing."
+            )
             return
-        points = list(self.pending_points)
-        self.add_shape("Custom Shape", points)
-        self.pending_points.clear()
+        if self._custom_shape_anchor_count() < 3:
+            messagebox.showinfo(
+                "Custom Shape", "Add at least three points before finishing."
+            )
+            return
+        commands = list(self.custom_shape_commands_pending)
+        sampled = _sample_custom_shape(commands, closed=True)
+        points = [(int(round(x)), int(round(y))) for x, y in sampled]
+        self.add_shape("Custom Shape", points, commands=commands)
+        self.reset_custom_shape_state()
+        self.custom_segment_type_var.set("Vertex")
         self.clear_preview()
         self.update_finish_button()
 
     def update_finish_button(self) -> None:
-        if self.shape_var.get() == "Custom Shape" and len(self.pending_points) >= 3:
-            self.finish_button.state(["!disabled"])
-        else:
-            self.finish_button.state(["disabled"])
+        if self.shape_var.get() == "Custom Shape":
+            anchors = self._custom_shape_anchor_count()
+            if anchors >= 3 and not self.custom_segment_buffer:
+                self.finish_button.state(["!disabled"])
+                return
+        self.finish_button.state(["disabled"])
 
     def on_shape_change(self, *_: object) -> None:
         self.pending_points.clear()
         self.clear_preview()
+        self.reset_custom_shape_state()
+        self.update_custom_controls()
+        self.custom_segment_type_var.set("Vertex")
         self.update_finish_button()
 
     def update_relative_entries(self) -> None:
@@ -522,12 +808,86 @@ class ProcessingExporterApp(tk.Tk):
         else:
             self.method_name_entry.state(["disabled"])
 
+    def update_custom_controls(self) -> None:
+        if self.shape_var.get() == "Custom Shape":
+            if not self.custom_controls_visible:
+                self.custom_controls_frame.pack(
+                    side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5)
+                )
+                self.custom_controls_visible = True
+        else:
+            if self.custom_controls_visible:
+                self.custom_controls_frame.pack_forget()
+                self.custom_controls_visible = False
+
+    def apply_canvas_size(self) -> None:
+        try:
+            width = int(self.canvas_width_var.get())
+            height = int(self.canvas_height_var.get())
+        except ValueError:
+            messagebox.showerror(
+                "Canvas Size", "Width and height must be integer values."
+            )
+            return
+        width = max(100, width)
+        height = max(100, height)
+        if width == self.canvas_width and height == self.canvas_height:
+            return
+        self.canvas_width = width
+        self.canvas_height = height
+        self.redraw_canvas()
+
+    def reset_custom_shape_state(self) -> None:
+        self.custom_shape_commands_pending = []
+        self.custom_segment_buffer = []
+
+    def on_custom_segment_change(self, *_: object) -> None:
+        if self.custom_segment_buffer:
+            self.custom_segment_buffer = []
+            if self.shape_var.get() == "Custom Shape":
+                self.draw_custom_shape_preview()
+        self.update_finish_button()
+
+    def _custom_shape_last_anchor(
+        self, commands: List[Tuple[str, Sequence[Tuple[int, int]]]]
+    ) -> Optional[Tuple[int, int]]:
+        if not commands:
+            return None
+        command, points = commands[-1]
+        if command == "vertex":
+            return points[0]
+        return points[-1]
+
+    def _custom_shape_anchor_count(self) -> int:
+        if not self.custom_shape_commands_pending:
+            return 0
+        count = 0
+        for command, points in self.custom_shape_commands_pending:
+            if command == "vertex":
+                count += 1
+            elif command in {"quadraticVertex", "bezierVertex"}:
+                count += 1
+        return count
+
     def on_grid_toggle(self) -> None:
         if self.grid_enabled_var.get():
-            self.pending_points = [self._apply_grid(x, y) for x, y in self.pending_points]
+            if self.shape_var.get() == "Custom Shape":
+                self.custom_shape_commands_pending = [
+                    (command, [self._apply_grid(x, y) for x, y in command_points])
+                    for command, command_points in self.custom_shape_commands_pending
+                ]
+                self.custom_segment_buffer = [
+                    self._apply_grid(x, y) for x, y in self.custom_segment_buffer
+                ]
+            else:
+                self.pending_points = [
+                    self._apply_grid(x, y) for x, y in self.pending_points
+                ]
         self.draw_grid()
         self.clear_preview()
-        if self.pending_points:
+        if self.shape_var.get() == "Custom Shape":
+            self.draw_custom_shape_preview()
+        elif self.pending_points:
             self.draw_preview(*self.pending_points)
 
     def on_grid_size_change(self, value: str) -> None:
@@ -536,6 +896,8 @@ class ProcessingExporterApp(tk.Tk):
         self.grid_size_label.configure(text=f"Grid: {size}px")
         if self.grid_enabled_var.get():
             self.draw_grid()
+            if self.shape_var.get() == "Custom Shape":
+                self.draw_custom_shape_preview()
 
     def draw_grid(self) -> None:
         for item in self.grid_item_ids:
@@ -544,13 +906,17 @@ class ProcessingExporterApp(tk.Tk):
         if not self.grid_enabled_var.get():
             return
         size = max(5, self.grid_size_var.get())
-        for x in range(0, CANVAS_WIDTH + 1, size):
+        for x in range(0, self.canvas_width + 1, size):
             self.grid_item_ids.append(
-                self.canvas.create_line(x, 0, x, CANVAS_HEIGHT, fill="#e0e0e0", tags="grid")
+                self.canvas.create_line(
+                    x, 0, x, self.canvas_height, fill="#e0e0e0", tags="grid"
+                )
             )
-        for y in range(0, CANVAS_HEIGHT + 1, size):
+        for y in range(0, self.canvas_height + 1, size):
             self.grid_item_ids.append(
-                self.canvas.create_line(0, y, CANVAS_WIDTH, y, fill="#e0e0e0", tags="grid")
+                self.canvas.create_line(
+                    0, y, self.canvas_width, y, fill="#e0e0e0", tags="grid"
+                )
             )
         self.canvas.tag_lower("grid")
 
